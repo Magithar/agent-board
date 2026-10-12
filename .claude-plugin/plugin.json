@@ -1,10 +1,26 @@
 {
   "name": "agent-board",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A task board several agents share: Claude tools, a live pane and lease heartbeats over an agent-neutral CLI",
-  "author": { "name": "Magithar", "url": "https://github.com/Magithar" },
+  "author": {
+    "name": "Magithar",
+    "url": "https://github.com/Magithar"
+  },
   "repository": "https://github.com/Magithar/agent-board",
   "license": "MIT",
-  "keywords": ["multi-agent", "task-board", "coordination", "codex"],
-  "types": "./types/index.d.ts"
+  "keywords": [
+    "multi-agent",
+    "task-board",
+    "coordination",
+    "codex"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "blocks": {
+      "type": "string",
+      "title": "Pane blocks",
+      "description": "Which blocks the board pane shows, in order, comma-separated. Available: clock, usage, agents, tasks.",
+      "default": "agents,usage,tasks"
+    }
+  }
 }

@@ -1,40 +1,68 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Task } from '../types'
+import type { Agent, Task, Usage } from '../types'
 
-// The mod is an adapter: every write goes through bin/board.mjs, the same CLI
-// Codex or a human runs. The mod adds what only Claude's host can: the
-// session's identity, heartbeats from tool activity, a live pane.
+// The mod is an adapter: every board read and write goes through bin/board.mjs,
+// the same CLI Codex or a human runs, so it works whatever storage block holds
+// the board. The mod adds what only Claude's host can: the session's identity,
+// heartbeats, usage readings, and a pane built from blocks.
 
 const PANE = 'agent-board'
 const HEARTBEAT_MS = 60_000
+const PRESENCE_MS = 60_000
 const POLL_MS = 3_000
+const NAME_TRIES = 9
 
 const tasks = atom({ plugin: 'agent-board', key: 'tasks' } as const, [])
+const agents = atom({ plugin: 'agent-board', key: 'agents' } as const, [])
 const me = atom({ plugin: 'agent-board', key: 'me' } as const, '')
+const usage = atom({ plugin: 'agent-board', key: 'usage' } as const, { limits: [] })
 
-let boardFile = ''
+let session = ''
 let lastBeat = 0
 
+async function cli($: EngineInterface, args: string[]) {
+  const run = await $.process.run(['node', `${$.plugin.root}/bin/board.mjs`, ...args])
+  return { ok: run.exitCode === 0, code: run.exitCode, text: (run.exitCode === 0 ? run.stdout : run.stderr || run.stdout).trim() }
+}
+
 async function board($: EngineInterface, args: string[]) {
-  const who = await read($, me)
-  const run = await $.process.run(['node', `${$.plugin.root}/bin/board.mjs`, ...args, '--as', who])
-  return { ok: run.exitCode === 0, text: (run.exitCode === 0 ? run.stdout : run.stderr || run.stdout).trim() }
+  return cli($, [...args, '--as', await read($, me)])
+}
+
+// Take the name asked for in BOARD_AGENT, or the next free one after it; with
+// none asked for, a name from the session id, which no other session has.
+async function takeName($: EngineInterface, wanted: string | undefined) {
+  if (!wanted) {
+    const name = `claude:${session.slice(0, 8)}`
+    await cli($, ['register', name, '--session', session])
+    return name
+  }
+  for (let i = 1; i <= NAME_TRIES; i++) {
+    const name = i === 1 ? wanted : `${wanted}-${i}`
+    const taken = await cli($, ['register', name, '--session', session])
+    if (taken.ok) {
+      if (i > 1) $.ui.toast(`board: "${wanted}" is in use by another live session, so this one is "${name}"`)
+      return name
+    }
+    if (taken.code !== 7) break
+  }
+  const name = `claude:${session.slice(0, 8)}`
+  $.ui.toast(`board: could not take the name "${wanted}", so this session is "${name}"`)
+  await cli($, ['register', name, '--session', session])
+  return name
 }
 
 async function refresh($: EngineInterface) {
-  if (!boardFile) return
-  const text = await $.fs.read(boardFile).catch(() => '')
-  const now = await $.clock.now()
-  // Show an expired lease as open even before the CLI next settles it.
-  const list: Task[] = (text ? (Object.values(JSON.parse(text).tasks) as Task[]) : []).map(t =>
-    t.claim && Date.parse(t.claim.expiresAt) < now ? { ...t, status: 'todo', claim: null } : t,
-  )
-  await update($, tasks, () => list)
+  const out = await cli($, ['view', '--json'])
+  if (!out.ok) return
+  const view = JSON.parse(out.text) as { tasks: Task[]; agents: Agent[] }
+  await update($, tasks, () => view.tasks)
+  await update($, agents, () => view.agents)
   const who = await read($, me)
-  const open = list.filter(t => t.status !== 'done').length
-  const mine = list.filter(t => t.claim?.owner === who).map(t => t.id)
+  const open = view.tasks.filter(t => t.status !== 'done').length
+  const mine = view.tasks.filter(t => t.claim?.owner === who).map(t => t.id)
   $.ui.status(open ? `board: ${open} open${mine.length ? ` · mine ${mine.join(',')}` : ''}` : undefined)
 }
 
@@ -48,7 +76,7 @@ const TOOLS = [
   },
   {
     name: 'board_show',
-    description: 'Show one task with its notes and handoffs. Read this before resuming a task someone else released.',
+    description: 'Show one task with its acceptance criteria, notes and handoffs. Read this before resuming a task someone else released.',
     schema: { id: { type: 'string' } },
     required: ['id'],
     args: (i: any) => ['show', i.id],
@@ -101,13 +129,73 @@ const TOOLS = [
 
 const SYMBOL = { todo: '○', claimed: '◐', done: '●' } as const
 
-export const register: Register = on => {
-  on('session.start', async ($, e, next) => {
-    const id = await $.session.id()
-    await update($, me, () => `claude:${id.slice(0, 8)}`)
+const pad = (n: number) => String(n).padStart(2, '0')
+const hhmm = (ms: number) => {
+  const d = new Date(ms)
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
 
-    const where = await $.process.run(['node', `${$.plugin.root}/bin/board.mjs`, 'where'])
-    boardFile = `${where.stdout.trim()}/board.json`
+// The pane is a stack of blocks. Each block is one function drawing one part;
+// the `blocks` setting picks which, in which order. A new block is a new entry.
+type Ctx = { Box: any; Text: any; width: number; now: number; who: string; tasks: Task[]; agents: Agent[]; usage: Usage }
+
+const BLOCKS: Record<string, (c: Ctx) => any> = {
+  clock: ({ Text, now }) => <Text bold>{hhmm(now)}</Text>,
+
+  usage: ({ Box, Text, usage: u, now }) => {
+    if (!u.limits.length && u.context === undefined && u.costUsd === undefined)
+      return <Text dimColor>usage: no reading yet</Text>
+    return (
+      <Box flexDirection="column">
+        {u.limits.map(l => (
+          <Text color={l.percentUsed >= 90 ? 'red' : l.percentUsed >= 70 ? 'yellow' : undefined}>
+            {`${l.kind}: ${Math.round(l.percentUsed)}% used`}
+            {l.resetsAt ? ` · resets ${hhmm(Date.parse(l.resetsAt))}${Date.parse(l.resetsAt) - now > 86_400_000 ? '+' : ''}` : ''}
+          </Text>
+        ))}
+        {u.context !== undefined && <Text dimColor>{`context: ${Math.round(u.context)}% full`}</Text>}
+        {u.costUsd !== undefined && <Text dimColor>{`cost: $${u.costUsd.toFixed(2)}`}</Text>}
+      </Box>
+    )
+  },
+
+  agents: ({ Text, who, agents: list }) => (
+    <Text dimColor>{`agents: ${list.map(a => (a.name === who ? `${a.name} (you)` : a.name)).join(', ') || who}`}</Text>
+  ),
+
+  tasks: ({ Box, Text, who, width, tasks: list }) => {
+    const order = { claimed: 0, todo: 1, done: 2 } as const
+    const shown = [...list].sort((a, b) => order[a.status] - order[b.status] || a.id.localeCompare(b.id))
+    if (!shown.length) return <Text dimColor>No tasks. Ask Claude to add some, or run `board add`.</Text>
+    return (
+      <Box flexDirection="column">
+        {shown.map(t => {
+          const owner = t.claim ? (t.claim.owner === who ? 'you' : t.claim.owner) : ''
+          const label = `${SYMBOL[t.status]} ${t.id} ${t.title}`
+          return (
+            <Box flexDirection="column">
+              <Text bold={owner === 'you'} dimColor={t.status === 'done'}>
+                {label.slice(0, Math.max(10, width - 2))}
+              </Text>
+              {owner && <Text dimColor>   {owner}</Text>}
+            </Box>
+          )
+        })}
+      </Box>
+    )
+  },
+}
+
+export const register: Register = (on, options) => {
+  const chosen = String(options.blocks ?? 'agents,usage,tasks')
+    .split(',')
+    .map(b => b.trim())
+    .filter(b => b in BLOCKS)
+
+  on('session.start', async ($, e, next) => {
+    session = await $.session.id()
+    const name = await takeName($, await $.env.get('BOARD_AGENT'))
+    await update($, me, () => name)
 
     for (const t of TOOLS)
       await $.tool.register({
@@ -120,6 +208,9 @@ export const register: Register = on => {
 
     await refresh($)
     $.clock.every(POLL_MS, () => refresh($).catch(() => {}))
+    // Presence: keeps this session's name while it is open, so no other
+    // session can take it; leases stay tied to work (see tool.call below).
+    $.clock.every(PRESENCE_MS, () => cli($, ['register', name, '--session', session]).catch(() => {}))
 
     return next(e)
   })
@@ -144,10 +235,19 @@ export const register: Register = on => {
     return ran
   })
 
-  // A session that ends (exit, /clear, resume, logout) comes back with a new
-  // identity, so its claims would sit orphaned until their leases ran out.
+  on('session.measure', async ($, e, next) => {
+    await update($, usage, () => ({
+      limits: e.rateLimits.map(l => ({ kind: l.kind, percentUsed: l.percentUsed, resetsAt: l.resetsAt })),
+      context: e.context.percent,
+      costUsd: e.cost?.usd,
+    }))
+    return next(e)
+  })
+
+  // A session that ends (exit, /clear, resume, logout) releases what it holds
+  // and gives up its name, so neither sits orphaned until a lease runs out.
   on('session.end', async ($, e, next) => {
-    await board($, ['release-all']).catch(() => {})
+    await board($, ['release-all', '--session', session]).catch(() => {})
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -161,29 +261,16 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const list = await read($, tasks)
-    const who = await read($, me)
-    const width = e.props.bodyColumns ?? 40
-    const order = { claimed: 0, todo: 1, done: 2 } as const
-    const shown = [...list].sort((a, b) => order[a.status] - order[b.status] || a.id.localeCompare(b.id))
-
-    return (
-      <Box flexDirection="column">
-        <Text dimColor>you: {who}</Text>
-        {shown.length === 0 && <Text dimColor>No tasks. Ask Claude to add some, or run `board add`.</Text>}
-        {shown.map(t => {
-          const owner = t.claim ? (t.claim.owner === who ? 'you' : t.claim.owner) : ''
-          const label = `${SYMBOL[t.status]} ${t.id} ${t.title}`
-          return (
-            <Box flexDirection="column">
-              <Text bold={owner === 'you'} dimColor={t.status === 'done'}>
-                {label.slice(0, Math.max(10, width - owner.length - 2))}
-              </Text>
-              {owner && <Text dimColor>   {owner}</Text>}
-            </Box>
-          )
-        })}
-      </Box>
-    )
+    const ctx: Ctx = {
+      Box,
+      Text,
+      width: e.props.bodyColumns ?? 40,
+      now: await $.clock.now(),
+      who: await read($, me),
+      tasks: await read($, tasks),
+      agents: await read($, agents),
+      usage: await read($, usage),
+    }
+    return <Box flexDirection="column">{chosen.map(name => BLOCKS[name]!(ctx))}</Box>
   })
 }

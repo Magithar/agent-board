@@ -11,9 +11,13 @@ and hand unfinished work to each other without losing context.
           │                                  │ automatic lease renewal, live pane
           └────────────────┬─────────────────┘
                            ▼
-                    bin/board.mjs        the only thing that writes the board
-                           ▼
-             <repo>/.agent-board/   board.json  +  ledger.jsonl
+                 bin/board.mjs  →  lib/engine.mjs     the rules, written once
+                                         │
+                                   Store interface    the socket
+                                         │
+                ┌────────────────────────┼─────────────────────┐
+           local files               (Supabase)           (board serve)
+        board.json + ledger.jsonl    not built yet        not built yet
 ```
 
 One zero-dependency Node CLI owns all state. The Claude Code mod is an
@@ -27,6 +31,13 @@ other agent uses the same CLI directly.
 
 ## How it works
 
+- **Storage is a block.** The engine never touches files. It reads a snapshot
+  from a Store and commits conditional writes ("only if this task is still at
+  the version I read"). Any backend that can do that atomically can hold a
+  board. `lib/store-file.mjs` documents the contract, and
+  `test/store-contract.test.mjs` holds every block to it. The file block is the
+  only one built in; `.agent-board/config.json` picks the block.
+
 - **Where the board lives:** `.agent-board/` next to the git *common* dir, so
   every worktree of a repo shares one board. Set `BOARD_DIR` to override it.
   Add `.agent-board/` to `.gitignore`, because it is runtime state.
@@ -36,6 +47,12 @@ other agent uses the same CLI directly.
 - **Leases:** a claim lasts 15 minutes (`BOARD_LEASE_MS`). `heartbeat` or
   `note` renews it. An expired claim goes back to todo, and the ledger records
   it, so an agent that crashed doesn't hold a task forever.
+- **Names:** start a session with `BOARD_AGENT=frontend` to name it. If
+  another live session already holds the name, the new one becomes
+  `frontend-2` and gets a toast explaining why. Without a name, a session is
+  `claude:<session id>`. An open session keeps its name with a presence
+  heartbeat; a name is freed when its session ends or goes silent for
+  3 minutes.
 - **Handoffs:** `release --handoff "..."` leaves a note that the next agent
   reads with `show` before it continues. When a Claude session ends (exit,
   `/clear`, resume, logout), the mod releases everything that session holds,
@@ -59,8 +76,10 @@ cd agent-board && npm link        # puts `board` on your PATH
 **The Claude Code mod:**
 
 ```bash
-claude --plugin-dir /path/to/agent-board
+BOARD_AGENT=frontend claude --plugin-dir /path/to/agent-board
 ```
+
+`BOARD_AGENT` is optional. It sets the name this session uses on the board.
 
 ## Use
 
@@ -77,11 +96,13 @@ board release T-001 --handoff "done X, left Y, see Z"
 board done T-001 --note "ran X, saw Y"    # required: how you verified it
 board release-all                         # free everything you hold
 board add "title" --desc "..." --accept "how to tell it is done"
+board agents                              # live agents
+board view                                # every task and live agent, as JSON
 board doctor                              # ledger vs state
 ```
 
-Every command takes `--json`. Exit codes: 2 usage, 3 lock busy, 4 no such
-task, 5 not yours, 6 held by another agent.
+Every command takes `--json`. Exit codes: 2 usage, 3 board busy, 4 no such
+task, 5 not yours, 6 held by another agent, 7 name in use.
 
 For agents other than Claude, put this protocol in their instructions
 (`AGENTS.md`):
@@ -94,6 +115,19 @@ For agents other than Claude, put this protocol in their instructions
 `claude:<session>`, and tool activity renews its leases. `/board` opens a
 live pane, and the status line shows open tasks and the ones this session
 holds.
+
+The pane is a stack of blocks, set in the plugin's `blocks` option
+(`/config`, comma-separated, in order):
+
+| Block | Shows |
+|---|---|
+| `clock` | the time |
+| `usage` | this session's plan usage per window with reset times, context fill and cost; amber at 70%, red at 90% |
+| `agents` | the agents live on the board |
+| `tasks` | the tasks, claimed first, yours in bold |
+
+The default is `agents,usage,tasks`. A new block is one function in the
+`BLOCKS` table in `hooks/register.tsx`.
 
 ## What has been tested
 
@@ -111,12 +145,19 @@ beyond the tool descriptions:
 
 Automated tests: `npm test` runs the CLI tests (a 20-way claim race,
 ownership, handoff, lease expiry, heartbeat, rejected-claim logging, verified
-done, release-all). `claude plugin test .` runs the mod tests (the pane, the
-tools, expired claims, the verification note, release on session end).
+done, release-all) and the store contract against the file block and an
+in-memory reference block (concurrent claims and adds, stale writes, names).
+`claude plugin test .` runs the mod tests (the pane, names and their
+fallback, the tools, the verification note, release on session end, the
+usage block, and choosing blocks).
 
 ## Known limitations
 
-- **It doesn't work across machines.** The board is a local directory.
+- **It doesn't work across machines yet.** The storage socket is in place,
+  but the only block built is local files. A database or server block comes
+  when a real cross-device need does.
+- **Usage is per session.** The usage block shows the session's own plan
+  usage, which Claude Code reports, not the other agents'.
 - **A crash skips the release on session end.** If a Claude process is killed
   outright, its claims are freed only when their leases expire (at most 15
   minutes).
