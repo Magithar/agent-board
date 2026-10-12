@@ -1,16 +1,12 @@
 import type { Task } from '../../types'
 import type { Block, Ctx } from './types'
-import { goingQuiet, handedOffBy, handoffWaiting, minutesLeft } from './attention'
+import { goingQuiet, handedOffBy, handoffWaiting } from './attention'
 
 function Row({ ui: { Box, Text }, width, now, who }: Ctx, t: Task) {
   const isMine = t.claim?.owner === who
   const owner = t.claim ? (isMine ? 'you' : t.claim.owner) : ''
-  const right =
-    t.status === 'claimed'
-      ? `${minutesLeft(t, now)}m left${goingQuiet(t, now) ? '  ⚠' : ''}`
-      : handoffWaiting(t)
-        ? `← handoff from ${handedOffBy(t)}`
-        : ''
+  // Said only when it needs you: an agent that stopped, or work left with notes.
+  const right = goingQuiet(t, now) ? 'stopped responding' : handoffWaiting(t) ? `left by ${handedOffBy(t)}, with notes` : ''
   const wide = width >= 64
   return (
     <Box>
@@ -36,16 +32,14 @@ function Row({ ui: { Box, Text }, width, now, who }: Ctx, t: Task) {
       )}
       {right && (
         <Box marginLeft={2}>
-          <Text color={goingQuiet(t, now) || handoffWaiting(t) ? 'warning' : undefined} dimColor={!goingQuiet(t, now) && !handoffWaiting(t)}>
-            {right}
-          </Text>
+          <Text color="warning">{right}</Text>
         </Box>
       )}
     </Box>
   )
 }
 
-// Working first, then open, with room between them; done tasks become a count.
+// In progress first, then waiting, with room between them; done tasks become a count.
 export const tasks: Block = {
   name: 'tasks',
   pane: c => {
@@ -58,13 +52,13 @@ export const tasks: Block = {
       <Box flexDirection="column" gap={1}>
         {working.length > 0 && (
           <Box flexDirection="column">
-            <Text bold>Working</Text>
+            <Text bold>In progress</Text>
             {working.map(t => Row(c, t))}
           </Box>
         )}
         {open.length > 0 && (
           <Box flexDirection="column">
-            <Text bold>Open</Text>
+            <Text bold>Waiting</Text>
             {open.map(t => Row(c, t))}
           </Box>
         )}

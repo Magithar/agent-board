@@ -140,36 +140,41 @@ For agents other than Claude, put this protocol in their instructions
 `board_claim`, `board_note`, `board_release` and `board_done`. Tool activity
 renews the session's leases.
 
+The CLI and the tools keep the board's precise terms (claim, release,
+handoff, lease) because agents act on them. The display uses plain words
+instead, so you can read it without learning those terms.
+
 ## What you see
 
 The display shows only what needs you. Everything else waits until you ask.
 
-**One line above the prompt**, always visible while the board has open work:
+**One line above the prompt**, always visible while there's work on the board:
 
 ```
-board   2 working · 1 open   ! T-005 handoff waiting   5h ▓▓▓▓▓▓▓░░░ 72%
+2 tasks waiting · 1 in progress   T-005 needs someone to continue it   5-hour limit ▓▓▓▓▓▓░░░░ 64%
 ```
 
-The `!` names the one thing that needs you: a task someone handed off that
-nobody has picked up, or an agent whose lease is nearly out because it went
-quiet. Usage appears only once a limit window passes 50%. With nothing open,
-the line disappears.
+The alert names the one thing that needs you: a task someone left with notes
+that nobody has picked up, or an agent that stopped responding (its claim is
+about to run out). Usage appears only once a limit passes 50%. It's green
+with room left, yellow from 70% and red from 90%. With nothing waiting or in
+progress, the line disappears.
 
 **`/board`** opens the full pane:
 
 ```
- Working
- ◐  T-004  Add a test script          frontend      11m left
- ◐  T-006  Add a LICENSE file         codex          3m left  ⚠
+ In progress
+ ◐  T-004  Add a test script           frontend
+ ◐  T-006  Add a LICENSE file          codex          stopped responding
 
- Open
- ○  T-005  Ghost task                 ← handoff from frontend
+ Waiting
+ ○  T-005  Ghost task                  left by frontend, with notes
 
  3 done
 
  Usage
- 5h     ▓▓▓▓▓▓▓░░░  72%   resets 12:00
- 7d     ▓▓░░░░░░░░  20%   resets in 3d
+ 5-hour limit   ▓▓▓▓▓▓░░░░  64%   resets 12:00
+ weekly limit   ▓▓░░░░░░░░  20%   resets in 3d
 ```
 
 Both are stacks of display blocks, chosen in the plugin's settings (`/config`)
@@ -177,8 +182,8 @@ as comma-separated lists, in order:
 
 | Block | Band | Pane | Shows |
 |---|---|---|---|
-| `summary` | ✓ | | counts, and the one thing that needs you |
-| `tasks` | | ✓ | working, then open, then a count of done |
+| `summary` | ✓ | | what's waiting and in progress, and the one thing that needs you |
+| `tasks` | | ✓ | in progress, then waiting, then a count of done |
 | `usage` | ✓ | ✓ | plan usage per window: in the band past 50%, in the pane with resets |
 | `clock` | ✓ | ✓ | the time |
 | `context` | ✓ | ✓ | context fill and the session's cost |

@@ -12,6 +12,3 @@ export const handedOffBy = (t: Task) => t.notes.at(-1)?.by ?? ''
 // renewing, for most of a lease.
 export const goingQuiet = (t: Task, now: number) =>
   t.status === 'claimed' && t.claim !== null && Date.parse(t.claim.expiresAt) - now < QUIET_MS
-
-export const minutesLeft = (t: Task, now: number) =>
-  t.claim ? Math.max(0, Math.round((Date.parse(t.claim.expiresAt) - now) / 60_000)) : 0

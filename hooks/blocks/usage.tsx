@@ -1,6 +1,6 @@
 import type { Block, Ctx } from './types'
 
-const LABEL: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend_limit: 'spend' }
+const LABEL: Record<string, string> = { five_hour: '5-hour limit', seven_day: 'weekly limit', spend_limit: 'spend limit' }
 const label = (kind: string) => LABEL[kind] ?? kind
 const CELLS = 10
 const filled = (percent: number) => Math.min(CELLS, Math.round((percent / 100) * CELLS))
@@ -48,7 +48,7 @@ export const usage: Block = {
         <Text bold>Usage</Text>
         {u.limits.map(l => (
           <Box>
-            <Box width={7}>
+            <Box width={15}>
               <Text dimColor>{label(l.kind)}</Text>
             </Box>
             {Meter(ui, l.percentUsed)}

@@ -62,10 +62,6 @@ async function refresh($: EngineInterface) {
   const view = JSON.parse(out.text) as { tasks: Task[]; agents: Agent[] }
   await update($, tasks, () => view.tasks)
   await update($, agents, () => view.agents)
-  const who = await read($, me)
-  const open = view.tasks.filter(t => t.status !== 'done').length
-  const mine = view.tasks.filter(t => t.claim?.owner === who).map(t => t.id)
-  $.ui.status(open ? `board: ${open} open${mine.length ? ` · mine ${mine.join(',')}` : ''}` : undefined)
 }
 
 const TOOLS = [
@@ -228,10 +224,7 @@ export const register: Register = (on, options) => {
     const parts = band.map(b => b.band!(c)).filter(part => part !== null)
     if (!parts.length) return next(e)
     return (
-      <Box gap={3}>
-        <Text dimColor>board</Text>
-        {parts}
-      </Box>
+      <Box gap={3}>{parts}</Box>
     )
   })
 

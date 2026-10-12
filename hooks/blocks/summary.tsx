@@ -1,7 +1,10 @@
 import type { Block } from './types'
 import { goingQuiet, handoffWaiting } from './attention'
 
-// The band's main line: how much is moving, and the one thing that needs you.
+const tasksWord = (n: number) => `${n} ${n === 1 ? 'task' : 'tasks'}`
+
+// The band's main line: how much is waiting and in progress, and the one thing
+// that needs you. Plain words: the reader need not know the board's terms.
 export const summary: Block = {
   name: 'summary',
   band: ({ ui: { Box, Text }, tasks, now }) => {
@@ -10,11 +13,11 @@ export const summary: Block = {
     if (!working && !open) return null
     const waiting = tasks.filter(handoffWaiting)
     const quiet = tasks.filter(t => goingQuiet(t, now))
-    const counts = [working && `${working} working`, open && `${open} open`].filter(Boolean).join(' · ')
+    const counts = [open && `${tasksWord(open)} waiting`, working && `${working} in progress`].filter(Boolean).join(' · ')
     const alert = waiting.length
-      ? `! ${waiting[0]!.id} handoff waiting${waiting.length > 1 ? ` +${waiting.length - 1}` : ''}`
+      ? `${waiting[0]!.id} needs someone to continue it${waiting.length > 1 ? ` (+${waiting.length - 1} more)` : ''}`
       : quiet.length
-        ? `! ${quiet[0]!.id} ${quiet[0]!.claim!.owner} went quiet`
+        ? `${quiet[0]!.id}: ${quiet[0]!.claim!.owner} stopped responding`
         : ''
     return (
       <Box gap={3}>
