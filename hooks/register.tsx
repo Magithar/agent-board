@@ -1,12 +1,14 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Agent, Task, Usage } from '../types'
+import type { Agent, Task } from '../types'
+import { BLOCKS, type Ctx } from './blocks'
 
 // The mod is an adapter: every board read and write goes through bin/board.mjs,
 // the same CLI Codex or a human runs, so it works whatever storage block holds
 // the board. The mod adds what only Claude's host can: the session's identity,
-// heartbeats, usage readings, and a pane built from blocks.
+// heartbeats, usage readings, and a display built from blocks (./blocks): a
+// one-line band above the prompt, and the /board pane.
 
 const PANE = 'agent-board'
 const HEARTBEAT_MS = 60_000
@@ -129,68 +131,27 @@ const TOOLS = [
 
 const SYMBOL = { todo: '○', claimed: '◐', done: '●' } as const
 
-const pad = (n: number) => String(n).padStart(2, '0')
-const hhmm = (ms: number) => {
-  const d = new Date(ms)
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
+const pick = (setting: unknown, fallback: string) =>
+  String(setting ?? fallback)
+    .split(',')
+    .map(name => BLOCKS.find(b => b.name === name.trim()))
+    .filter(b => b !== undefined)
 
-// The pane is a stack of blocks. Each block is one function drawing one part;
-// the `blocks` setting picks which, in which order. A new block is a new entry.
-type Ctx = { Box: any; Text: any; width: number; now: number; who: string; tasks: Task[]; agents: Agent[]; usage: Usage }
-
-const BLOCKS: Record<string, (c: Ctx) => any> = {
-  clock: ({ Text, now }) => <Text bold>{hhmm(now)}</Text>,
-
-  usage: ({ Box, Text, usage: u, now }) => {
-    if (!u.limits.length && u.context === undefined && u.costUsd === undefined)
-      return <Text dimColor>usage: no reading yet</Text>
-    return (
-      <Box flexDirection="column">
-        {u.limits.map(l => (
-          <Text color={l.percentUsed >= 90 ? 'red' : l.percentUsed >= 70 ? 'yellow' : undefined}>
-            {`${l.kind}: ${Math.round(l.percentUsed)}% used`}
-            {l.resetsAt ? ` · resets ${hhmm(Date.parse(l.resetsAt))}${Date.parse(l.resetsAt) - now > 86_400_000 ? '+' : ''}` : ''}
-          </Text>
-        ))}
-        {u.context !== undefined && <Text dimColor>{`context: ${Math.round(u.context)}% full`}</Text>}
-        {u.costUsd !== undefined && <Text dimColor>{`cost: $${u.costUsd.toFixed(2)}`}</Text>}
-      </Box>
-    )
-  },
-
-  agents: ({ Text, who, agents: list }) => (
-    <Text dimColor>{`agents: ${list.map(a => (a.name === who ? `${a.name} (you)` : a.name)).join(', ') || who}`}</Text>
-  ),
-
-  tasks: ({ Box, Text, who, width, tasks: list }) => {
-    const order = { claimed: 0, todo: 1, done: 2 } as const
-    const shown = [...list].sort((a, b) => order[a.status] - order[b.status] || a.id.localeCompare(b.id))
-    if (!shown.length) return <Text dimColor>No tasks. Ask Claude to add some, or run `board add`.</Text>
-    return (
-      <Box flexDirection="column">
-        {shown.map(t => {
-          const owner = t.claim ? (t.claim.owner === who ? 'you' : t.claim.owner) : ''
-          const label = `${SYMBOL[t.status]} ${t.id} ${t.title}`
-          return (
-            <Box flexDirection="column">
-              <Text bold={owner === 'you'} dimColor={t.status === 'done'}>
-                {label.slice(0, Math.max(10, width - 2))}
-              </Text>
-              {owner && <Text dimColor>   {owner}</Text>}
-            </Box>
-          )
-        })}
-      </Box>
-    )
-  },
+async function context($: EngineInterface, width: number, ui: Ctx['ui']): Promise<Ctx> {
+  return {
+    ui,
+    width,
+    now: await $.clock.now(),
+    who: await read($, me),
+    tasks: await read($, tasks),
+    agents: await read($, agents),
+    usage: await read($, usage),
+  }
 }
 
 export const register: Register = (on, options) => {
-  const chosen = String(options.blocks ?? 'agents,usage,tasks')
-    .split(',')
-    .map(b => b.trim())
-    .filter(b => b in BLOCKS)
+  const band = pick(options.band, 'summary,usage').filter(b => b.band)
+  const pane = pick(options.pane, 'tasks,usage').filter(b => b.pane)
 
   on('session.start', async ($, e, next) => {
     session = await $.session.id()
@@ -259,18 +220,29 @@ export const register: Register = (on, options) => {
     return { text: list.map(t => `${SYMBOL[t.status]} ${t.id}  ${t.title}${t.claim ? `  ${t.claim.owner}` : ''}`).join('\n') || '(no open tasks)' }
   })
 
+  // The band: one line above the prompt, quiet when no block has anything to say.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey || !band.length) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    const c = await context($, e.props.bodyColumns, { Box, Text })
+    const parts = band.map(b => b.band!(c)).filter(part => part !== null)
+    if (!parts.length) return next(e)
+    return (
+      <Box gap={3}>
+        <Text dimColor>board</Text>
+        {parts}
+      </Box>
+    )
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const ctx: Ctx = {
-      Box,
-      Text,
-      width: e.props.bodyColumns ?? 40,
-      now: await $.clock.now(),
-      who: await read($, me),
-      tasks: await read($, tasks),
-      agents: await read($, agents),
-      usage: await read($, usage),
-    }
-    return <Box flexDirection="column">{chosen.map(name => BLOCKS[name]!(ctx))}</Box>
+    const c = await context($, e.props.bodyColumns ?? 40, { Box, Text })
+    const parts = pane.map(b => b.pane!(c)).filter(part => part !== null)
+    return (
+      <Box flexDirection="column" gap={1} paddingX={1}>
+        {parts}
+      </Box>
+    )
   })
 }

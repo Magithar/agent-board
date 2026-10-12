@@ -4,17 +4,14 @@
 //
 // The board lives in <repo>/.agent-board/, beside the git *common* dir so
 // every worktree of a repo shares one board (BOARD_DIR overrides). Which
-// storage block holds it is read from .agent-board/config.json; the default,
-// and the only block built in, is "file".
+// storage block holds it is named in .agent-board/config.json (see
+// lib/load-store.mjs); the default is the built-in "file" block.
 
 import { execFileSync } from 'node:child_process'
-import fs from 'node:fs'
 import path from 'node:path'
 
 import { BoardError, createEngine } from '../lib/engine.mjs'
-import { fileStore } from '../lib/store-file.mjs'
-
-const STORES = { file: dir => fileStore(dir) }
+import { loadStore } from '../lib/load-store.mjs'
 
 function boardDir() {
   if (process.env.BOARD_DIR) return path.resolve(process.env.BOARD_DIR)
@@ -27,15 +24,6 @@ function boardDir() {
   } catch {
     return path.resolve('.agent-board')
   }
-}
-
-function openStore(dir) {
-  const file = path.join(dir, 'config.json')
-  const config = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {}
-  const kind = config.store ?? 'file'
-  const make = STORES[kind]
-  if (!make) throw new BoardError(2, `no storage block "${kind}" (known: ${Object.keys(STORES).join(', ')})`)
-  return make(dir, config)
 }
 
 function parseArgs(argv) {
@@ -109,7 +97,7 @@ const commands = {
   // Everything a display needs, in one call: every task and the live agents.
   view: async board => ({ tasks: await board.list({ all: true }), agents: await board.agents() }),
   events: (board, [since]) => board.events(Number(since ?? 0)),
-  doctor: board => board.doctor(),
+  doctor: async (board, _, __, store) => ({ block: store, ...(await board.doctor()) }),
   where: () => DIR,
 }
 
@@ -122,8 +110,9 @@ async function main() {
     process.exit(2)
   }
   try {
-    const board = createEngine(openStore(DIR), { leaseMs: Number(process.env.BOARD_LEASE_MS ?? 15 * 60 * 1000) })
-    const out = await run(board, pos, flags)
+    const { store, name } = await loadStore(DIR)
+    const board = createEngine(store, { leaseMs: Number(process.env.BOARD_LEASE_MS ?? 15 * 60 * 1000) })
+    const out = await run(board, pos, flags, name)
     console.log(flags.json || typeof out !== 'string' ? JSON.stringify(out, null, 2) : out)
   } catch (err) {
     if (!(err instanceof BoardError)) throw err

@@ -34,10 +34,7 @@ other agent uses the same CLI directly.
 - **Storage is a block.** The engine never touches files. It reads a snapshot
   from a Store and commits conditional writes ("only if this task is still at
   the version I read"). Any backend that can do that atomically can hold a
-  board. `lib/store-file.mjs` documents the contract, and
-  `test/store-contract.test.mjs` holds every block to it. The file block is the
-  only one built in; `.agent-board/config.json` picks the block.
-
+  board. See [Storage blocks](#storage-blocks).
 - **Where the board lives:** `.agent-board/` next to the git *common* dir, so
   every worktree of a repo shares one board. Set `BOARD_DIR` to override it.
   Add `.agent-board/` to `.gitignore`, because it is runtime state.
@@ -63,6 +60,35 @@ other agent uses the same CLI directly.
 - **Ledger:** every change is appended to `ledger.jsonl`, including lost
   claims (`claim-rejected`, with the holder). `board doctor` checks that the
   ledger and the state agree.
+
+## Storage blocks
+
+`.agent-board/config.json` names the block that holds the board. Everything
+else in that file is the block's own settings:
+
+```json
+{ "store": "file" }                                     the built-in default
+{ "store": "./stores/supabase.mjs", "url": "..." }      a block file, relative to .agent-board/
+{ "store": "agent-board-supabase" }                     a block published as a package
+```
+
+A block is one module that exports `createStore(config, { dir })` and returns
+five methods: `now`, `snapshot`, `commit`, `events` and `verify`. The hard one
+is `commit`: it must apply all of its writes or none, and only where every
+version still matches what was read. The contract is written out in
+[`lib/store-file.mjs`](lib/store-file.mjs).
+[`examples/store-memory.mjs`](examples/store-memory.mjs) is a complete block
+in about 20 lines to copy from.
+
+Check a block against the rules the engine relies on:
+
+```js
+import { storeContract } from 'agent-board/lib/contract.mjs'
+storeContract('my block', () => createStore(config, { dir }))
+```
+
+The CLI refuses a block that won't load or is missing a method, and names it
+in the error.
 
 ## Install
 
@@ -111,23 +137,57 @@ For agents other than Claude, put this protocol in their instructions
 > finishing, release it with a handoff. Never touch a task another agent holds.
 
 **Claude Code** gets these tools: `board_list`, `board_show`, `board_add`,
-`board_claim`, `board_note`, `board_release` and `board_done`. It runs as
-`claude:<session>`, and tool activity renews its leases. `/board` opens a
-live pane, and the status line shows open tasks and the ones this session
-holds.
+`board_claim`, `board_note`, `board_release` and `board_done`. Tool activity
+renews the session's leases.
 
-The pane is a stack of blocks, set in the plugin's `blocks` option
-(`/config`, comma-separated, in order):
+## What you see
 
-| Block | Shows |
-|---|---|
-| `clock` | the time |
-| `usage` | this session's plan usage per window with reset times, context fill and cost; amber at 70%, red at 90% |
-| `agents` | the agents live on the board |
-| `tasks` | the tasks, claimed first, yours in bold |
+The display shows only what needs you. Everything else waits until you ask.
 
-The default is `agents,usage,tasks`. A new block is one function in the
-`BLOCKS` table in `hooks/register.tsx`.
+**One line above the prompt**, always visible while the board has open work:
+
+```
+board   2 working · 1 open   ! T-005 handoff waiting   5h ▓▓▓▓▓▓▓░░░ 72%
+```
+
+The `!` names the one thing that needs you: a task someone handed off that
+nobody has picked up, or an agent whose lease is nearly out because it went
+quiet. Usage appears only once a limit window passes 50%. With nothing open,
+the line disappears.
+
+**`/board`** opens the full pane:
+
+```
+ Working
+ ◐  T-004  Add a test script          frontend      11m left
+ ◐  T-006  Add a LICENSE file         codex          3m left  ⚠
+
+ Open
+ ○  T-005  Ghost task                 ← handoff from frontend
+
+ 3 done
+
+ Usage
+ 5h     ▓▓▓▓▓▓▓░░░  72%   resets 12:00
+ 7d     ▓▓░░░░░░░░  20%   resets in 3d
+```
+
+Both are stacks of display blocks, chosen in the plugin's settings (`/config`)
+as comma-separated lists, in order:
+
+| Block | Band | Pane | Shows |
+|---|---|---|---|
+| `summary` | ✓ | | counts, and the one thing that needs you |
+| `tasks` | | ✓ | working, then open, then a count of done |
+| `usage` | ✓ | ✓ | plan usage per window: in the band past 50%, in the pane with resets |
+| `clock` | ✓ | ✓ | the time |
+| `context` | ✓ | ✓ | context fill and the session's cost |
+| `agents` | | ✓ | who is live on the board |
+
+The defaults are `band: summary,usage` and `pane: tasks,usage`. Each block is
+its own file in [`hooks/blocks/`](hooks/blocks/). To add one, write a file of
+the same shape (see `types.ts`), then list it in `index.ts`. Claude Code mods
+can't load code at runtime, so a new block takes that one line in the index.
 
 ## What has been tested
 
@@ -147,9 +207,11 @@ Automated tests: `npm test` runs the CLI tests (a 20-way claim race,
 ownership, handoff, lease expiry, heartbeat, rejected-claim logging, verified
 done, release-all) and the store contract against the file block and an
 in-memory reference block (concurrent claims and adds, stale writes, names).
-`claude plugin test .` runs the mod tests (the pane, names and their
-fallback, the tools, the verification note, release on session end, the
-usage block, and choosing blocks).
+It also checks that the CLI loads a block named in `config.json` and refuses
+a broken one. `claude plugin test .` runs the mod tests (the pane's sections
+and alerts, the band and when it stays quiet, names and their fallback, the
+tools, the verification note, release on session end, usage, and choosing
+blocks).
 
 ## Known limitations
 

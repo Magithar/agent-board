@@ -1,6 +1,6 @@
 {
   "name": "agent-board",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A task board several agents share: Claude tools, a live pane and lease heartbeats over an agent-neutral CLI",
   "author": {
     "name": "Magithar",
@@ -16,11 +16,17 @@
   ],
   "types": "./types/index.d.ts",
   "userConfig": {
-    "blocks": {
+    "band": {
+      "type": "string",
+      "title": "Band blocks",
+      "description": "Blocks on the one line above the prompt, in order, comma-separated: summary, usage, clock, context.",
+      "default": "summary,usage"
+    },
+    "pane": {
       "type": "string",
       "title": "Pane blocks",
-      "description": "Which blocks the board pane shows, in order, comma-separated. Available: clock, usage, agents, tasks.",
-      "default": "agents,usage,tasks"
+      "description": "Blocks in the /board pane, in order, comma-separated: tasks, usage, clock, context, agents.",
+      "default": "tasks,usage"
     }
   }
 }

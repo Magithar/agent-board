@@ -46,19 +46,70 @@ const START = { cwd: '/repo', surface: 'terminal', isInteractive: true } as cons
 const PANE = { component: 'Pane', requestId: 'agent-board', props: { title: 'Agent board', bodyColumns: 60 } } as const
 const texts = async (ui: any) => (await ui.findAll({ type: 'Text' })).map((t: any) => t.text)
 
-test('the pane lists claimed tasks first and marks the ones this session holds', async ($, on) => {
-  host(on, [task('T-002', 'todo'), task('T-001', 'claimed', 'claude:aaaa1111'), task('T-003', 'claimed', 'codex')])
+const BAND = { component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 3, bodyColumns: 100 } } as const
+const inMinutes = (m: number) => new Date(NOW + m * 60_000).toISOString()
+const handedOff = (id: string, by: string): Task => ({ ...task(id, 'todo'), notes: [{ at: '', by, text: 'HANDOFF: part 1 done' }] })
+
+test('the pane groups working above open, and counts done', async ($, on) => {
+  host(on, [
+    task('T-002', 'todo'),
+    { ...task('T-001', 'claimed', 'claude:aaaa1111'), claim: { owner: 'claude:aaaa1111', since: '', expiresAt: inMinutes(11) } },
+    task('T-003', 'claimed', 'codex'),
+    task('T-004', 'done'),
+  ])
   await $.session.start(START)
 
   for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ plugin: 'agent-board', surface, ...PANE } as any)
+    const ui = await $.ui.mount({ plugin: 'agent-board', surface, ...PANE, props: { ...PANE.props, bodyColumns: 80 } } as any)
     const shown = await texts(ui)
-    expect(shown).toContain('agents: codex')
-    expect(shown.indexOf('◐ T-001 title of T-001')).toBeLessThan(shown.indexOf('○ T-002 title of T-002'))
-    expect(shown).toContain('   you')
-    expect(shown).toContain('   codex')
+    expect(shown.indexOf('Working')).toBeLessThan(shown.indexOf('title of T-001'))
+    expect(shown.indexOf('title of T-003')).toBeLessThan(shown.indexOf('Open'))
+    expect(shown.indexOf('Open')).toBeLessThan(shown.indexOf('title of T-002'))
+    expect(shown).toContain('you')
+    expect(shown).toContain('codex')
+    expect(shown).toContain('11m left')
+    expect(shown).toContain('1 done')
+    expect(shown).not.toContain('title of T-004')
     await ui.unmount()
   }
+})
+
+test('the pane flags a handoff nobody picked up and a claim going quiet', async ($, on) => {
+  host(on, [
+    handedOff('T-005', 'frontend'),
+    { ...task('T-006', 'claimed', 'codex'), claim: { owner: 'codex', since: '', expiresAt: inMinutes(3) } },
+  ])
+  await $.session.start(START)
+  const ui = await $.ui.mount({ plugin: 'agent-board', surface: 'terminal', ...PANE } as any)
+  const shown = await texts(ui)
+  expect(shown).toContain('← handoff from frontend')
+  expect(shown).toContain('3m left  ⚠')
+})
+
+test('the band is one line: counts, and the one thing that needs you', async ($, on) => {
+  host(on, [handedOff('T-005', 'frontend'), task('T-001', 'claimed', 'codex'), task('T-002', 'todo')])
+  await $.session.start(START)
+  const ui = await $.ui.mount({ plugin: 'agent-board', surface: 'terminal', ...BAND } as any)
+  expect(await texts(ui)).toEqual(['board', '1 working · 2 open', '! T-005 handoff waiting'])
+})
+
+test('the band names a claim going quiet when no handoff waits', async ($, on) => {
+  host(on, [{ ...task('T-006', 'claimed', 'codex'), claim: { owner: 'codex', since: '', expiresAt: inMinutes(2) } }])
+  await $.session.start(START)
+  const ui = await $.ui.mount({ plugin: 'agent-board', surface: 'terminal', ...BAND } as any)
+  expect(await texts(ui)).toContain('! T-006 codex went quiet')
+})
+
+test('the band stays out of the way when the board has nothing open', async ($, on) => {
+  host(on, [task('T-001', 'done')])
+  // Stands for Claude Code's own band beneath the mod.
+  on('ui.render', { component: 'AbovePrompt' } as any, ($: any, e: any) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine's own</Text>
+  })
+  await $.session.start(START)
+  const ui = await $.ui.mount({ plugin: 'agent-board', surface: 'terminal', ...BAND } as any)
+  expect(await texts(ui)).toEqual(["engine's own"])
 })
 
 test('a session takes the name it was started with', async ($, on) => {
@@ -103,36 +154,53 @@ test('ending the session releases what it holds and gives up its name', async ($
   ])
 })
 
-test('the usage block shows the latest reading', async ($, on) => {
-  host(on, [])
-  on('session.measure', (_$, e: any) => ({ changed: e.changed }))
-  await $.session.start(START)
-  await $.session.measure({
-    context: { window: 200000, percent: 41.6 },
-    rateLimits: [{ kind: 'five_hour', percentUsed: 72.4, resetsAt: '2026-10-12T12:00:00', source: 'x' }],
-    cost: { usd: 1.234 },
-    changed: ['context', 'rateLimits', 'cost'],
-  } as any)
-  const ui = await $.ui.mount({ plugin: 'agent-board', surface: 'terminal', ...PANE } as any)
-  const shown = await texts(ui)
-  expect(shown).toContain('five_hour: 72% used · resets 12:00')
-  expect(shown).toContain('context: 42% full')
-  expect(shown).toContain('cost: $1.23')
+const measure = (percentUsed: number) => ({
+  context: { window: 200000, percent: 41.6 },
+  rateLimits: [
+    { kind: 'five_hour', percentUsed, resetsAt: '2026-10-12T12:00:00' },
+    { kind: 'seven_day', percentUsed: 20, resetsAt: '2026-10-15T12:00:00' },
+  ],
+  cost: { usd: 1.234 },
+  changed: ['context', 'rateLimits', 'cost'],
 })
 
-test('the blocks setting picks the blocks and their order', { options: { blocks: 'clock,tasks' } } as any, async ($, on) => {
+test('usage shows in the pane with resets, and in the band only past half', async ($, on) => {
   host(on, [task('T-001', 'todo')])
+  on('session.measure', (_$, e: any) => ({ changed: e.changed }))
   await $.session.start(START)
-  const ui = await $.ui.mount({ plugin: 'agent-board', surface: 'terminal', ...PANE } as any)
-  const shown = await texts(ui)
+
+  await $.session.measure(measure(31) as any)
+  const pane = await $.ui.mount({ plugin: 'agent-board', surface: 'terminal', ...PANE } as any)
+  const inPane = await texts(pane)
+  expect(inPane).toContain('▓▓▓░░░░░░░  31%')
+  expect(inPane).toContain('   resets 12:00')
+  expect(inPane).toContain('   resets in 3d')
+  let band = await $.ui.mount({ plugin: 'agent-board', surface: 'terminal', ...BAND } as any)
+  expect((await texts(band)).some((t: string) => t.startsWith('5h'))).toBe(false)
+  await band.unmount()
+
+  await $.session.measure(measure(72.4) as any)
+  band = await $.ui.mount({ plugin: 'agent-board', surface: 'terminal', ...BAND } as any)
+  expect(await texts(band)).toContain('5h ▓▓▓▓▓▓▓░░░ 72%')
+})
+
+test('the band and pane settings pick blocks and their order', { options: { band: 'clock', pane: 'clock,tasks,context' } } as any, async ($, on) => {
+  host(on, [task('T-001', 'todo')])
+  on('session.measure', (_$, e: any) => ({ changed: e.changed }))
+  await $.session.start(START)
+  await $.session.measure(measure(72) as any)
+  const band = await $.ui.mount({ plugin: 'agent-board', surface: 'terminal', ...BAND } as any)
+  expect(await texts(band)).toEqual(['board', '09:41'])
+  const pane = await $.ui.mount({ plugin: 'agent-board', surface: 'terminal', ...PANE } as any)
+  const shown = await texts(pane)
   expect(shown[0]).toBe('09:41')
-  expect(shown[1]).toBe('○ T-001 title of T-001')
-  expect(shown.some((t: string) => t.startsWith('agents:') || t.startsWith('usage'))).toBe(false)
+  expect(shown.at(-1)).toBe('context 42% full · cost $1.23')
+  expect(shown.some((t: string) => t.includes('%  ') || t === 'Usage')).toBe(false)
 })
 
 test('an empty board says how to add a task', async ($, on) => {
   host(on, [])
   await $.session.start(START)
   const ui = await $.ui.mount({ plugin: 'agent-board', surface: 'terminal', ...PANE } as any)
-  expect(await ui.find({ type: 'Text', text: /No tasks/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /No tasks yet/ })).toBeDefined()
 })

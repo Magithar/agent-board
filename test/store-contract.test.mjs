@@ -1,90 +1,57 @@
-// Every storage block must pass this file. A new block (a database, a server)
-// adds itself to BLOCKS and is held to the same rules as the local one.
+// Holds every block this repo ships, and the loader, to the store contract.
 
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { describe, test } from 'node:test'
+import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
-import { createEngine } from '../lib/engine.mjs'
+import { storeContract } from '../lib/contract.mjs'
 import { fileStore } from '../lib/store-file.mjs'
+import { createStore as memory } from '../examples/store-memory.mjs'
 
-// The smallest block that keeps the contract: the reference for writing one.
-function memoryStore() {
-  const state = { tasks: {}, agents: {} }
-  const ledger = []
-  return {
-    now: () => Date.now(),
-    snapshot: async () => structuredClone(state),
-    commit: async ({ writes, events }) => {
-      const table = kind => (kind === 'task' ? state.tasks : state.agents)
-      for (const w of writes) if ((table(w.kind)[w.key]?.version ?? 0) !== w.expect) return { ok: false, conflict: w.key }
-      for (const w of writes) {
-        if (w.value === null) delete table(w.kind)[w.key]
-        else table(w.kind)[w.key] = { ...structuredClone(w.value), version: w.expect + 1 }
-      }
-      for (const e of events) ledger.push({ seq: ledger.length + 1, at: new Date().toISOString(), ...e })
-      return { ok: true }
-    },
-    events: async (since = 0) => ledger.filter(e => e.seq > since),
-    verify: async () => ({ ok: true, problems: [] }),
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
+const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'board-'))
+
+storeContract('file', () => fileStore(path.join(tmp(), '.agent-board')))
+storeContract('memory (example)', () => memory())
+
+function board(dir, args) {
+  try {
+    return { code: 0, out: execFileSync('node', [path.join(ROOT, 'bin/board.mjs'), ...args], { env: { ...process.env, BOARD_DIR: dir }, encoding: 'utf8', stdio: 'pipe' }) }
+  } catch (err) {
+    return { code: err.status, out: String(err.stderr) }
   }
 }
 
-const BLOCKS = {
-  file: () => fileStore(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'board-')), '.agent-board')),
-  memory: () => memoryStore(),
-}
+test('config.json can name a block file, which the CLI loads', () => {
+  const dir = path.join(tmp(), '.agent-board')
+  fs.mkdirSync(dir, { recursive: true })
+  // A block of its own: the file block, saving under a folder of its choosing.
+  fs.writeFileSync(
+    path.join(dir, 'my-block.mjs'),
+    `import { fileStore } from ${JSON.stringify(path.join(ROOT, 'lib/store-file.mjs'))}\n` +
+      `export const createStore = (config, { dir }) => fileStore(dir + '/' + config.folder)\n`,
+  )
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ store: './my-block.mjs', folder: 'elsewhere' }))
+  assert.equal(board(dir, ['add', 'hello']).code, 0)
+  assert.ok(fs.existsSync(path.join(dir, 'elsewhere', 'board.json')))
+  assert.equal(JSON.parse(board(dir, ['doctor']).out).block, './my-block.mjs')
+})
 
-const refused = async (promise, code) => assert.equal(await promise.then(() => 0, err => err.code), code)
+test('a block that cannot load, or breaks the contract shape, is refused by name', () => {
+  const dir = path.join(tmp(), '.agent-board')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ store: './missing.mjs' }))
+  const missing = board(dir, ['list'])
+  assert.equal(missing.code, 2)
+  assert.match(missing.out, /cannot load storage block "\.\/missing\.mjs"/)
 
-for (const [name, make] of Object.entries(BLOCKS)) {
-  describe(`the ${name} block`, () => {
-    test('one of many concurrent claims wins; the rest are refused and recorded', async () => {
-      const store = make()
-      const board = createEngine(store)
-      await board.add('human', { title: 'contested' })
-      const outcomes = await Promise.all(
-        Array.from({ length: 10 }, (_, i) => board.claim('T-001', `a${i}`).then(() => 'won', err => err.code)),
-      )
-      assert.equal(outcomes.filter(o => o === 'won').length, 1)
-      assert.equal(outcomes.filter(o => o === 6).length, 9)
-      const events = await store.events(0)
-      assert.equal(events.filter(e => e.type === 'claim-rejected').length, 9)
-    })
-
-    test('concurrent adds get distinct ids', async () => {
-      const board = createEngine(make())
-      const added = await Promise.all(Array.from({ length: 8 }, (_, i) => board.add('human', { title: `t${i}` })))
-      assert.equal(new Set(added.map(t => t.id)).size, 8)
-    })
-
-    test('a write from an agent that no longer owns the task is refused', async () => {
-      const board = createEngine(make(), { leaseMs: 50 })
-      await board.add('human', { title: 'x' })
-      await board.claim('T-001', 'alice')
-      await new Promise(resolve => setTimeout(resolve, 80))
-      await board.claim('T-001', 'bob')
-      await refused(board.note('T-001', 'alice', 'stale write'), 5)
-      assert.equal((await board.show('T-001')).claim.owner, 'bob')
-    })
-
-    test('a name is refused while another live session holds it, and freed when it ends', async () => {
-      const board = createEngine(make())
-      await board.register('frontend', 'session-a')
-      await board.register('frontend', 'session-a')
-      await refused(board.register('frontend', 'session-b'), 7)
-      await board.releaseAll('frontend', { session: 'session-a' })
-      await board.register('frontend', 'session-b')
-      assert.deepEqual((await board.agents()).map(a => a.name), ['frontend'])
-    })
-
-    test('a name whose session went silent can be taken over', async () => {
-      const board = createEngine(make(), { presenceMs: 50 })
-      await board.register('frontend', 'session-a')
-      await new Promise(resolve => setTimeout(resolve, 80))
-      await board.register('frontend', 'session-b')
-    })
-  })
-}
+  fs.writeFileSync(path.join(dir, 'half.mjs'), 'export const createStore = () => ({ now: () => 0, snapshot: () => ({}) })\n')
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ store: './half.mjs' }))
+  const half = board(dir, ['list'])
+  assert.equal(half.code, 2)
+  assert.match(half.out, /is missing: commit, events, verify/)
+})
