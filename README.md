@@ -37,9 +37,15 @@ other agent uses the same CLI directly.
   `note` renews it. An expired claim goes back to todo, and the ledger records
   it, so an agent that crashed doesn't hold a task forever.
 - **Handoffs:** `release --handoff "..."` leaves a note that the next agent
-  reads with `show` before it continues.
-- **Ledger:** every change is appended to `ledger.jsonl`. `board doctor`
-  checks that the ledger and the state agree.
+  reads with `show` before it continues. When a Claude session ends (exit,
+  `/clear`, resume, logout), the mod releases everything that session holds,
+  with an automatic handoff. That matters because a restarted session comes
+  back with a new identity.
+- **Done means verified:** `done` needs a `--note` saying how the task was
+  checked, against its `--accept` criteria if it has any.
+- **Ledger:** every change is appended to `ledger.jsonl`, including lost
+  claims (`claim-rejected`, with the holder). `board doctor` checks that the
+  ledger and the state agree.
 
 ## Install
 
@@ -68,8 +74,9 @@ board claim T-001                         # exit 6 if another agent holds it
 board note T-001 "what changed"           # also renews your lease
 board heartbeat                           # renew all your leases
 board release T-001 --handoff "done X, left Y, see Z"
-board done T-001 --note "tested by ..."
-board add "title" --desc "..."
+board done T-001 --note "ran X, saw Y"    # required: how you verified it
+board release-all                         # free everything you hold
+board add "title" --desc "..." --accept "how to tell it is done"
 board doctor                              # ledger vs state
 ```
 
@@ -103,18 +110,18 @@ beyond the tool descriptions:
 | An agent's lease runs out | the task returns to todo, and the ledger records `expire` |
 
 Automated tests: `npm test` runs the CLI tests (a 20-way claim race,
-ownership, handoff, lease expiry and heartbeat). `claude plugin test .` runs
-the mod tests (the pane, the tools and expired claims).
+ownership, handoff, lease expiry, heartbeat, rejected-claim logging, verified
+done, release-all). `claude plugin test .` runs the mod tests (the pane, the
+tools, expired claims, the verification note, release on session end).
 
 ## Known limitations
 
-- **A restarted Claude session gets a new identity**, so a task it held stays
-  locked until its lease expires (at most 15 minutes).
-- **"Done" isn't tied to acceptance criteria.** An agent can mark a task done
-  without testing it.
-- **Rejected claims aren't recorded in the ledger**, so collisions appear only
-  in the agents' transcripts.
 - **It doesn't work across machines.** The board is a local directory.
+- **A crash skips the release on session end.** If a Claude process is killed
+  outright, its claims are freed only when their leases expire (at most 15
+  minutes).
+- **A verification note is the agent's own claim.** The board requires one
+  but doesn't run the check itself.
 
 ## License
 

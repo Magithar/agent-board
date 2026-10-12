@@ -69,6 +69,21 @@ test('a claim whose lease ran out shows as open, not held', async ($, on) => {
   expect(texts).not.toContain('   ghost')
 })
 
+test('board_done passes the verification note through', async ($, on) => {
+  const calls = host(on, [task('T-001', 'claimed', 'claude:aaaa1111')])
+  await $.session.start(START)
+  await $.tool.call({ tool: 'mcp__agent-board__board_done', id: 'T-001', note: 'ran it, saw hello' } as any)
+  expect(calls.find(argv => argv.includes('done'))?.slice(-6)).toEqual(['done', 'T-001', '--note', 'ran it, saw hello', '--as', 'claude:aaaa1111'])
+})
+
+test('ending the session releases everything it holds', async ($, on) => {
+  const calls = host(on, [])
+  on('session.end', () => ({ sessionId: 'aaaa1111-2222-3333-4444-555566667777' }))
+  await $.session.start(START)
+  await $.session.end({ reason: 'logout' } as any)
+  expect(calls.find(argv => argv.includes('release-all'))?.slice(-3)).toEqual(['release-all', '--as', 'claude:aaaa1111'])
+})
+
 test('an empty board says how to add a task', async ($, on) => {
   host(on, [])
   await $.session.start(START)

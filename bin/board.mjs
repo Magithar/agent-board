@@ -92,9 +92,9 @@ function mutate(actor, type, fn) {
   })
 }
 
-function record(state, actor, type, task) {
+function record(state, actor, type, task, extra = {}) {
   state.seq += 1
-  const event = { seq: state.seq, at: new Date().toISOString(), actor, type, task }
+  const event = { seq: state.seq, at: new Date().toISOString(), actor, type, task, ...extra }
   fs.appendFileSync(LEDGER, JSON.stringify(event) + '\n')
 }
 
@@ -179,13 +179,14 @@ const commands = {
     if (flags.json) return t
     const out = [line(t), '']
     if (t.description) out.push(t.description, '')
+    if (t.accept) out.push(`Accept when: ${t.accept}`, '')
     if (t.claim) out.push(`claimed by ${t.claim.owner} until ${t.claim.expiresAt}`)
     for (const n of t.notes) out.push(`- [${n.at.slice(0, 16)}] ${n.by}: ${n.text}`)
     return out.join('\n')
   },
 
   add([title], flags) {
-    if (!title) throw new BoardError(2, 'usage: board add "<title>" [--desc "..."]')
+    if (!title) throw new BoardError(2, 'usage: board add "<title>" [--desc "..."] [--accept "how to tell it is done"]')
     const actor = flags.as ?? process.env.BOARD_AGENT ?? 'human'
     return mutate(actor, 'add', state => {
       const id = `T-${String(state.nextId++).padStart(3, '0')}`
@@ -193,6 +194,7 @@ const commands = {
         id,
         title,
         description: typeof flags.desc === 'string' ? flags.desc : '',
+        accept: typeof flags.accept === 'string' ? flags.accept : '',
         status: 'todo',
         claim: null,
         notes: [],
@@ -204,13 +206,21 @@ const commands = {
 
   claim([id], flags) {
     const actor = actorOf(flags)
-    return mutate(actor, 'claim', state => {
+    return withLock(() => {
+      const state = load()
+      expireLeases(state)
       const t = getTask(state, id)
       if (t.status === 'done') throw new BoardError(5, `${t.id} is done`)
-      if (t.status === 'claimed' && t.claim.owner !== actor)
+      if (t.status === 'claimed' && t.claim.owner !== actor) {
+        // A lost race is evidence too: keep it in the ledger, not only in a transcript.
+        record(state, actor, 'claim-rejected', t.id, { holder: t.claim.owner })
+        save(state)
         throw new BoardError(6, `${t.id} is already claimed by ${t.claim.owner} until ${t.claim.expiresAt}`)
+      }
       t.status = 'claimed'
       t.claim = { owner: actor, since: t.claim?.since ?? new Date().toISOString(), expiresAt: lease() }
+      record(state, actor, 'claim', t.id)
+      save(state)
       return t
     })
   },
@@ -253,15 +263,40 @@ const commands = {
     })
   },
 
+  // Done means verified: the note says how, against the task's acceptance if it has one.
   done([id], flags) {
     const actor = actorOf(flags)
     return mutate(actor, 'done', state => {
       const t = getTask(state, id)
       requireOwner(t, actor)
-      if (typeof flags.note === 'string') t.notes.push({ at: new Date().toISOString(), by: actor, text: flags.note })
+      if (typeof flags.note !== 'string' || !flags.note.trim())
+        throw new BoardError(
+          2,
+          `done needs --note saying how you verified ${t.id}` + (t.accept ? ` against: ${t.accept}` : ''),
+        )
+      t.notes.push({ at: new Date().toISOString(), by: actor, text: `VERIFIED: ${flags.note}` })
       t.status = 'done'
       t.claim = null
       return t
+    })
+  },
+
+  // Release everything this actor holds, e.g. when its session ends.
+  'release-all'(_, flags) {
+    const actor = actorOf(flags)
+    const handoff = typeof flags.handoff === 'string' ? flags.handoff : `${actor} ended without releasing; read the notes above`
+    return withLock(() => {
+      const state = load()
+      expireLeases(state)
+      const mine = Object.values(state.tasks).filter(t => t.claim?.owner === actor)
+      for (const t of mine) {
+        t.notes.push({ at: new Date().toISOString(), by: actor, text: `HANDOFF: ${handoff}` })
+        t.status = 'todo'
+        t.claim = null
+        record(state, actor, 'release', t.id)
+      }
+      save(state)
+      return { released: mine.map(t => t.id) }
     })
   },
 

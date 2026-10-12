@@ -55,10 +55,15 @@ const TOOLS = [
   },
   {
     name: 'board_add',
-    description: 'Add a task to the shared board.',
-    schema: { title: { type: 'string' }, description: { type: 'string' } },
+    description: 'Add a task to the shared board. Give it acceptance criteria: how to tell it is done.',
+    schema: { title: { type: 'string' }, description: { type: 'string' }, accept: { type: 'string' } },
     required: ['title'],
-    args: (i: any) => ['add', i.title, ...(i.description ? ['--desc', i.description] : [])],
+    args: (i: any) => [
+      'add',
+      i.title,
+      ...(i.description ? ['--desc', i.description] : []),
+      ...(i.accept ? ['--accept', i.accept] : []),
+    ],
   },
   {
     name: 'board_claim',
@@ -85,10 +90,12 @@ const TOOLS = [
   },
   {
     name: 'board_done',
-    description: 'Mark a task you hold as done. Only after its acceptance criteria are tested.',
+    description:
+      'Mark a task you hold as done. Only after you have checked it against its acceptance criteria (board_show lists them). ' +
+      'The note says how you verified it: what you ran or checked and what you saw.',
     schema: { id: { type: 'string' }, note: { type: 'string' } },
-    required: ['id'],
-    args: (i: any) => ['done', i.id, ...(i.note ? ['--note', i.note] : [])],
+    required: ['id', 'note'],
+    args: (i: any) => ['done', i.id, '--note', i.note ?? ''],
   },
 ]
 
@@ -136,6 +143,13 @@ export const register: Register = on => {
     }
     return ran
   })
+
+  // A session that ends (exit, /clear, resume, logout) comes back with a new
+  // identity, so its claims would sit orphaned until their leases ran out.
+  on('session.end', async ($, e, next) => {
+    await board($, ['release-all']).catch(() => {})
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'board' }, async $ => {
     await refresh($)
