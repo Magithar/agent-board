@@ -172,7 +172,9 @@ test('usage shows in the pane with resets, and in the band only past half', asyn
   await $.session.measure(measure(31) as any)
   const pane = await $.ui.mount({ plugin: 'agent-board', surface: 'terminal', ...PANE } as any)
   const inPane = await texts(pane)
-  expect(inPane).toContain('▓▓▓░░░░░░░  31%')
+  expect(inPane).toContain('▓▓▓')
+  expect(inPane).toContain('░░░░░░░')
+  expect(inPane).toContain('  31%')
   expect(inPane).toContain('   resets 12:00')
   expect(inPane).toContain('   resets in 3d')
   let band = await $.ui.mount({ plugin: 'agent-board', surface: 'terminal', ...BAND } as any)
@@ -181,7 +183,21 @@ test('usage shows in the pane with resets, and in the band only past half', asyn
 
   await $.session.measure(measure(72.4) as any)
   band = await $.ui.mount({ plugin: 'agent-board', surface: 'terminal', ...BAND } as any)
-  expect(await texts(band)).toContain('5h ▓▓▓▓▓▓▓░░░ 72%')
+  expect(await texts(band)).toEqual(expect.arrayContaining(['5h', '▓▓▓▓▓▓▓', '░░░', '  72%']))
+})
+
+test('usage is green with room, yellow from 70%, red from 90%', async ($, on) => {
+  host(on, [task('T-001', 'todo')])
+  on('session.measure', (_$, e: any) => ({ changed: e.changed }))
+  await $.session.start(START)
+  for (const [percent, color] of [[64, 'success'], [72, 'warning'], [93, 'error']] as const) {
+    await $.session.measure(measure(percent) as any)
+    const band = await $.ui.mount({ plugin: 'agent-board', surface: 'terminal', ...BAND } as any)
+    const used = await band.find({ type: 'Text', text: /^▓+$/ })
+    expect(used?.props.color).toBe(color)
+    expect((await band.find({ type: 'Text', text: /^░+$/ }))?.props.dimColor).toBe(true)
+    await band.unmount()
+  }
 })
 
 test('the band and pane settings pick blocks and their order', { options: { band: 'clock', pane: 'clock,tasks,context' } } as any, async ($, on) => {
